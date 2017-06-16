@@ -17,7 +17,6 @@ logger.setLevel(logging.INFO)
 sfn_client = boto3.client('stepfunctions')
 batch_client = boto3.client('batch')
 
-
 Arn = namedtuple('Arn', ['partition', 'service', 'region', 'account', 'resourcetype', 'resource'])
 BatchJob = namedtuple('BatchJob', ['id', 'name'])
 BatchRecord = namedtuple('BatchRecord', ['execution_id', 'batch_job', 'task_token', 'status'])
@@ -80,17 +79,11 @@ def handler_schedule(event, context):
         logger.info('task_token={}, task_event={}'.format(task_token, json.dumps(task_event)))
 
         if task_token == '':
-            # There are no tasks waiting to be scheduled.  Either we're too early (and the Activity hasn't been
-            # processed by SFN yet) or we're too late, and it's already been scheduled by another Lambda.
-            if get_job_data(execution_id, task_token) is not None:
-                # Some other invocation of this Lambda scheduled the jobs.  We're done
-                logger.info('Batch jobs already scheduled, nothing to do')
-                return
-            else:
-                # We're too early
-                logger.info('No task waiting, sleeping')
-                sleep(10)
-                continue
+            # There are no tasks waiting to be scheduled.  We're too early (and the Activity hasn't been
+            # processed by SFN yet)
+            logger.info('No task waiting, sleeping')
+            sleep(10)
+            continue
 
         # Otherwise we have scheduling work to do
         scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
@@ -100,10 +93,6 @@ def handler_schedule(event, context):
             # We just scheduled our job.  Let's be selfish and not wait for any others
             logger.info('Batch jobs successfully scheduled')
             return
-        elif get_job_data(execution_id, task_token) is not None:
-            # Some other invocation of this Lambda scheduled the jobs.  We're done
-            logger.info('Batch jobs already scheduled, nothing more to do')
-            return
 
         # Otherwise we go round again
         logger.info('Going round for another pass')
@@ -111,174 +100,9 @@ def handler_schedule(event, context):
 
     # When we get here, we have too little time left to be sure of managing a full cycle.  So if our job hasn't come up,
     # we need to fail the invocation so that SFN retries this task and starts a new invocation
-    if get_job_data(execution_id, task_token) is not None:
-        # Some other execution of this Lambda scheduled the jobs.  We're done
-        logger.info('Batch jobs already scheduled')
-        return
-    else:
-        raise Exception("Our activity did not come up for scheduling before the time ran out")
+    raise Exception("Our activity did not come up for scheduling before the time ran out")
 
     pass
-
-
-def handler_schedule_clones(event, context):
-    """
-    Called when the a Step Function requests that one or more tasks be scheduled as Batch jobs.  This expects an `event`
-    input in the following form:
-    
-    {
-        "Meta": {
-            "ExecutionArn": <STRING>,
-            "ActivityArn": <STRING>
-        },
-        "Input": <LIST>,
-        "Resource": {
-            "BatchJobDefinition": <ARN>,
-            "BatchJobQueue": <ARN>
-        },
-    }
-    
-    The `Resource` ARN must be an AWS Batch Job Definition.  The same job will be scheduled receiving as input each 
-    member of the `Input` array
-    
-    `ExecutionArn` is probably *not* the *actual* ARN of the execution, but any unique value will do.
-    
-    :param event:
-    :param context:
-    :return:
-    """
-    new_event = {'Meta': event.get('Meta', None), 'Input': {}, 'Branches': []}
-    resource = event.get('Resource', None)
-
-    i = 0
-    for input_data in event.get('Input', []):
-        new_event['Input'][i] = input_data
-        new_event['Resources'].append({'Resource': resource, 'InputPath': i})
-        i += 1
-
-    return handler_schedule(new_event, context)
-
-    pass
-
-
-def handler_schedule_single(event, context):
-    """
-    Called when the a Step Function requests that one or more tasks be scheduled as Batch jobs.  This expects an `event`
-    input in the following form:
-    
-    {
-        "Meta": {
-            "ExecutionArn": <STRING>,
-            "ActivityArn": <STRING>
-        },
-        "Input": <OBJECT>,
-        "Resource": {
-            "BatchJobDefinition": <ARN>,
-            "BatchJobQueue": <ARN>
-        },
-    }
-    
-    The `Resource` ARN must be an AWS Batch Job Definition.  The job will be scheduled receiving the `Input` array
-    
-    `ExecutionArn` is probably *not* the *actual* ARN of the execution, but any unique value will do.
-    
-    :param event:
-    :param context:
-    :return:
-    """
-    return handler_schedule({
-        'Meta': event.get('Meta', None),
-        'Input': {'only': event.get('Input', None)},
-        'Branches': [{'Resource': event.get('Resource', None), 'InputPath': 'only'}],
-        '_Debug': event.get('_Debug', {})
-    }, context)
-
-    pass
-
-
-def handler_respond(event, context):
-    """
-    Called when a Batch Job has completed its work.  This expects an `event`
-    input in the following form:
-    
-    {
-        "Meta": {
-            "ExecutionArn": <STRING>,
-            "BatchJob": {
-                "Id": <ID>,
-                "Name": <STRING>
-            },
-            "TaskToken": <STRING>
-        },
-        "Status": <STATUS>,
-        "Error": <STRING>?,
-        "Input": <OBJECT>
-    }
-    :param event: 
-    :param context: 
-    :return: 
-    """
-    execution_id = event.get('Meta', {}).get('ExecutionArn', None)
-    if execution_id is None:
-        raise Exception("Meta.ExecutionArn must be specified")
-
-    batch_job = event.get('Meta', {}).get('BatchJob', None)
-    if not isinstance(batch_job, dict):
-        raise Exception("Meta.BatchJob must be specified")
-    if 'Id' not in batch_job:
-        raise Exception("Meta.BatchJob.Id must be specified")
-    batch_job = BatchJob(id=batch_job['Id'], name=batch_job['Name'])
-
-    task_token = event.get('Meta', {}).get('TaskToken', None)
-    if task_token is None:
-        raise Exception("Meta.TaskToken must be specified")
-
-    jobs = get_job_data(execution_id, task_token, batch_job)
-
-    if len(jobs) == 0:
-        # There are no records of this job in the database.
-        # TODO
-        pass
-
-    job = jobs[0]
-
-    if job.task_token is None:
-        # No task token was stored
-        # TODO
-        pass
-
-    status = event.get('Status', None)
-    if status == 'SUCCEEDED':
-        # This job succeeded
-        job.status = 'SUCCEEDED'
-        save_job_data([job])
-
-        # Now if we're the last to return, we can signal the SFN Execution to continue
-        all_jobs = get_job_data(execution_id, job.task_token)
-        if all([job.status == 'SUCCEEDED' for job in all_jobs]):
-            sfn_client.send_task_success(
-                taskToken=job.task_token,
-                output=''  # TODO output aggregation
-            )
-        else:
-            sfn_client.send_task_heartbeat(
-                taskToken=job.task_token
-            )
-
-    elif status == 'FAILED':
-        # If one job failed, the whole parallel execution failed.  Signal the SFN Activity, and it will be re-run and
-        # a new set of Batch jobs will be scheduled.
-        # TODO currently all the successful parallel jobs will be rescheduled too.  That's wasteful
-        sfn_client.send_task_failure(
-            taskToken=job.task_token,
-            error=event.get('Error', 'BatchJobFailure'),
-            cause="Batch job with id '{}' failed".format(job.batch_job.id)
-        )
-
-    else:
-        # Weird state
-        # TODO
-        pass
 
 
 def schedule_batch_jobs(event, task_token):
@@ -303,9 +127,9 @@ def schedule_batch_jobs(event, task_token):
     for branch in branches:
         input_datum = get_json_path(input_data, branch['InputPath'])
         job_name = "{}-{}".format(
-                meta['ExecutionArn'][:32],
-                md5(json.dumps(input_datum, default=json_serial).encode('utf-8')).hexdigest()[:32]
-            )
+            meta['ExecutionArn'][:32],
+            md5(json.dumps(input_datum, default=json_serial).encode('utf-8')).hexdigest()[:32]
+        )
 
         response = batch_client.submit_job(
             jobName=job_name,
@@ -332,31 +156,7 @@ def schedule_batch_jobs(event, task_token):
         # TODO
         pass
 
-    save_job_data(jobs)
-
     return meta['ExecutionArn']
-
-
-def get_job_data(execution_id, task_token, job_id: BatchJob = None) -> List[BatchRecord]:
-    """
-    Get the current state of a job (or all jobs) from the database
-    :param execution_id: 
-    :param task_token: 
-    :type job_id: BatchJob
-    :return: 
-    """
-    # TODO
-    return []
-
-
-def save_job_data(jobs: List[BatchRecord]):
-    """
-    Save the current state of the jobs to the database
-    :return: 
-    """
-    # TODO
-    logger.info(jobs)
-    return None
 
 
 def validate_schedule_input(input_data, branches):
@@ -425,15 +225,19 @@ def validate_meta(event):
 def get_json_path(source, path):
     if path == '$':
         return source
-
-    parts = path.split('.')
+    parts = re.sub('\[([^\]]+)\]', '.\\1.', path).strip('.').split('.')
     if parts[0] != '$':
         raise Exception("Path must be based on '$'")
     if len(parts) > 2:
         raise Exception("Subpaths not currently supported")
-    if parts[1] not in source:
-        raise Exception("Path '{}' not found in Input".format(path))
-    return source[parts[1]]
+    if isinstance(source, dict):
+        if parts[1] not in source:
+            raise Exception("Path '{}' not found in Input".format(path))
+        return source[parts[1]]
+    if isinstance(source, list):
+        if len(source) < int(parts[1]):
+            raise Exception("List index out of range")
+        return source[int(parts[1])]
 
 
 def parse_arn(arn: str) -> Arn:
