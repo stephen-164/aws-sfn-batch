@@ -127,7 +127,7 @@ def schedule_batch_jobs(event, task_token):
     for branch in branches:
         input_datum = get_json_path(input_data, branch['InputPath'])
         job_name = "{}-{}".format(
-            meta['ExecutionArn'][:32],
+            md5(meta['ExecutionArn'].encode('utf-8')).hexdigest()[:32],
             md5(json.dumps(input_datum, default=json_serial).encode('utf-8')).hexdigest()[:32]
         )
 
@@ -156,7 +156,7 @@ def schedule_batch_jobs(event, task_token):
         meta['TaskToken'] = task_token
         print([{'jobId': job.batch_job.id} for job in jobs])
         response = batch_client.submit_job(
-            jobName=meta['ExecutionArn'][:32],
+            jobName=md5(meta['ExecutionArn'].encode('utf-8')).hexdigest()[:32],
             jobQueue=branches[0]['Resource']['BatchJobQueue'],
             jobDefinition=parse_arn(meta['NoopJobDefinition']).resource,
             parameters={
