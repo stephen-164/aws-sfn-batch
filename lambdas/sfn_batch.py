@@ -118,6 +118,9 @@ def schedule_batch_jobs(event, task_token):
 
     validate_schedule_input(input_data, branches)
 
+    # Always include the task token to use in case of failure
+    meta['TaskTokenFailure'] = task_token
+
     if len(branches) == 1:
         # Only one branch, can return immediately
         meta['TaskToken'] = task_token
