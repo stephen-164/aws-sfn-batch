@@ -153,8 +153,22 @@ def schedule_batch_jobs(event, task_token):
 
     if len(branches) > 1:
         # Submit a blank job that depends on all the others that signals SFN
-        # TODO
-        pass
+        meta['TaskToken'] = task_token
+        print([{'jobId': job.batch_job.id} for job in jobs])
+        response = batch_client.submit_job(
+            jobName=meta['ExecutionArn'][:32],
+            jobQueue=branches[0]['Resource']['BatchJobQueue'],
+            jobDefinition=parse_arn(meta['NoopJobDefinition']).resource,
+            parameters={
+                "Meta": json.dumps(meta, default=json_serial),
+                "Input": "{}"
+            },
+            dependsOn=[{'jobId': job.batch_job.id} for job in jobs],
+            containerOverrides={
+                "environment": [{"name": "ENVIRONMENT", "value": meta.get('Environment', 'dev')}]
+            }
+        )
+        logger.info(response)
 
     return meta['ExecutionArn']
 
