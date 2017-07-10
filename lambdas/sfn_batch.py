@@ -5,8 +5,12 @@ import logging
 from collections import namedtuple
 
 import boto3
+import copy
 import json
+import os
 import re
+import signal
+import time
 from hashlib import md5
 from time import sleep
 from typing import List
@@ -22,11 +26,25 @@ BatchJob = namedtuple('BatchJob', ['id', 'name'])
 BatchRecord = namedtuple('BatchRecord', ['execution_id', 'batch_job', 'task_token', 'status'])
 
 
+class TimeoutException(Exception):
+    """
+    A custom exception for timeouts
+    """
+    pass
+
+
+def timeout_handler(signum, frame):
+    """
+    A function that gets signalled when timeout happens
+    """
+    raise TimeoutException
+
+
 def handler_schedule(event, context):
     """
     Called when the a Step Function requests that one or more tasks be scheduled as Batch jobs.  This expects an `event`
     input in the following form:
-    
+
     {
         "Meta": {
             "ExecutionArn": <STRING>,
@@ -44,15 +62,15 @@ def handler_schedule(event, context):
             }
         ]
     }
-    
+
     Where for each branch, <PATHSPEC> is a reference into the `Input` object to get the path for that batch invocation.
-    
+
     The `Resource` ARN must be an AWS Batch Job Definition.  
-    
+
     `ExecutionArn` is probably *not* the *actual* ARN of the execution, but any unique value will do.
-    
+
     If your input data is not in this format, there are various other  possible entry points which will munge it for you
-    
+
     :param event:
     :param context:
     :return:
@@ -62,55 +80,66 @@ def handler_schedule(event, context):
     execution_id = str(event['Meta']['ExecutionArn'])
     activity_arn = str(event['Meta']['ActivityArn'])
 
-    while context.get_remaining_time_in_millis() > 90000:
-        # We have time to go for another pass
-        logger.info('{}ms remaining'.format(context.get_remaining_time_in_millis()))
+    # Change the behavior of SIGALRM
+    signal.signal(signal.SIGALRM, timeout_handler)
 
-        if event.get('_Debug', {}).get('_ActivityTaskToken', None) is not None:
-            logger.debug('Getting task_token from debug parameters')
-            (task_token, task_event) = event['_Debug']['_ActivityTaskToken'], event['_Debug']['_ActivityTaskEvent']
-        else:
-            logger.info('Polling for task_token')
-            response = sfn_client.get_activity_task(
-                activityArn=activity_arn,
-                workerName=context.log_stream_name[-80:]
-            )
-            (task_token, task_event) = (response['taskToken'], json.loads(response['input']))
-        logger.info('task_token={}, task_event={}'.format(task_token, json.dumps(task_event)))
+    # Request a signal alarm after 180 seconds
+    signal.alarm(45)
 
-        if task_token == '':
-            # There are no tasks waiting to be scheduled.  We're too early (and the Activity hasn't been
-            # processed by SFN yet)
-            logger.info('No task waiting, sleeping')
-            sleep(10)
+    try:
+        while True:
+            # We have time to go for another pass
+            logger.info('{}ms remaining'.format(context.get_remaining_time_in_millis()))
+
+            if event.get('_Debug', {}).get('_ActivityTaskToken', None) is not None:
+                logger.debug('Getting task_token from debug parameters')
+                (task_token, task_event) = event['_Debug']['_ActivityTaskToken'], event['_Debug']['_ActivityTaskEvent']
+            else:
+                logger.info('Polling for task_token')
+                response = sfn_client.get_activity_task(
+                    activityArn=activity_arn,
+                    workerName=context.log_stream_name[-80:]
+                )
+                print(response)
+                (task_token, task_event) = (response.get('taskToken', ''), json.loads(response.get('input','""')))
+            logger.info('task_token={}, task_event={}'.format(task_token, json.dumps(task_event)))
+
+            if task_token == '':
+                # There are no tasks waiting to be scheduled.  We're too early (and the Activity hasn't been
+                # processed by SFN yet)
+                logger.info('No task waiting, sleeping')
+                sleep(10)
+                continue
+
+            # Otherwise we have scheduling work to do
+            scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
+            logger.info('Scheduled batch jobs, scheduled_execution_id={}'.format(scheduled_execution_id))
+
+            if scheduled_execution_id == execution_id:
+                # We just scheduled our job.  Let's be selfish and not wait for any others
+                logger.info('Batch jobs successfully scheduled')
+                break
+
+            # Otherwise we go round again
+            logger.info('Going round for another pass')
             continue
 
-        # Otherwise we have scheduling work to do
-        scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
-        logger.info('Scheduled batch jobs, scheduled_execution_id={}'.format(scheduled_execution_id))
+    except TimeoutException:
+        # When we get here, we have too little time left to be sure of managing a full cycle.  So if our job hasn't come up,
+        # we need to fail the invocation so that SFN retries this task and starts a new invocation
+        print("Our activity did not come up for scheduling before the time ran out")
 
-        if scheduled_execution_id == execution_id:
-            # We just scheduled our job.  Let's be selfish and not wait for any others
-            logger.info('Batch jobs successfully scheduled')
-            return
-
-        # Otherwise we go round again
-        logger.info('Going round for another pass')
-        continue
-
-    # When we get here, we have too little time left to be sure of managing a full cycle.  So if our job hasn't come up,
-    # we need to fail the invocation so that SFN retries this task and starts a new invocation
-    raise Exception("Our activity did not come up for scheduling before the time ran out")
-
-    pass
+    else:
+        # Reset the alarm
+        signal.alarm(0)
 
 
 def schedule_batch_jobs(event, task_token):
     """
     Schedule the jobs that have been requested
-    :param event: 
-    :param task_token: 
-    :return: 
+    :param event:
+    :param task_token:
+    :return:
     """
     meta = event.get('Meta', None)
     input_data = event.get('Input', None)
@@ -120,30 +149,46 @@ def schedule_batch_jobs(event, task_token):
 
     # Always include the task token to use in case of failure
     meta['TaskTokenFailure'] = task_token
+    meta['Profiling'] = {
+        'ScheduleTime': time.time(),
+    }
 
     if len(branches) == 1:
         # Only one branch, can return immediately
         meta['TaskToken'] = task_token
 
+    execution_name = meta.get('ExecutionName', md5(meta['ExecutionArn'].encode('utf-8')).hexdigest())[:23]
+
     # Submit the jobs!
     jobs = []
     for branch in branches:
         input_datum = get_json_path(input_data, branch['InputPath'])
-        job_name = "{}-{}".format(
-            md5(meta['ExecutionArn'].encode('utf-8')).hexdigest()[:32],
-            md5(json.dumps(input_datum, default=json_serial).encode('utf-8')).hexdigest()[:32]
+        branch_name = md5(json.dumps(input_datum, default=json_serial).encode('utf-8')).hexdigest()[:8]
+        job_name = "{}-{}-{}".format(
+            execution_name,
+            branch['Resource']['BatchJob'],
+            branch_name
         )
+
+        branch_meta = copy.deepcopy(meta)
+        branch_meta['Profiling']['BranchScheduleTime'] = time.time()
 
         response = batch_client.submit_job(
             jobName=job_name,
             jobQueue=branch['Resource']['BatchJobQueue'],
             jobDefinition=parse_arn(branch['Resource']['BatchJobDefinition']).resource,
             parameters={
-                "Meta": json.dumps(meta, default=json_serial),
+                "Job": branch['Resource']['BatchJob'],
+                "Meta": json.dumps(branch_meta, default=json_serial),
                 "Input": json.dumps(input_datum, default=json_serial)
             },
             containerOverrides={
-                "environment": [{"name": "ENVIRONMENT", "value": meta.get('Environment', 'dev')}]
+                "environment": [
+                    {"name": "ENVIRONMENT", "value": meta.get('Environment', 'dev')},
+                    {"name": "AWS_DEFAULT_REGION", "value": os.environ['AWS_DEFAULT_REGION']},
+                ],
+                "memory": branch['Resource'].get('Memory', 256),
+                "vcpus": branch['Resource'].get('Vcpus', 2),
             }
         )
         logger.info(response)
@@ -157,18 +202,26 @@ def schedule_batch_jobs(event, task_token):
     if len(branches) > 1:
         # Submit a blank job that depends on all the others that signals SFN
         meta['TaskToken'] = task_token
-        print([{'jobId': job.batch_job.id} for job in jobs])
         response = batch_client.submit_job(
-            jobName=md5(meta['ExecutionArn'].encode('utf-8')).hexdigest()[:32],
+            jobName="{}-{}".format(
+                execution_name,
+                'noop'
+            ),
             jobQueue=branches[0]['Resource']['BatchJobQueue'],
             jobDefinition=parse_arn(meta['NoopJobDefinition']).resource,
             parameters={
+                "Job": 'noop',
                 "Meta": json.dumps(meta, default=json_serial),
                 "Input": "{}"
             },
             dependsOn=[{'jobId': job.batch_job.id} for job in jobs],
             containerOverrides={
-                "environment": [{"name": "ENVIRONMENT", "value": meta.get('Environment', 'dev')}]
+                "environment": [
+                    {"name": "ENVIRONMENT", "value": meta.get('Environment', 'dev')},
+                    {"name": "AWS_DEFAULT_REGION", "value": os.environ['AWS_DEFAULT_REGION']},
+                ],
+                "memory": 64,
+                "vcpus": 1,
             }
         )
         logger.info(response)
@@ -224,7 +277,8 @@ def validate_schedule_input(input_data, branches):
     res = batch_client.describe_job_definitions(jobDefinitions=list(all_batch_job_definition_arns))
     for job_definition in res['jobDefinitions']:
         if job_definition['status'] != 'ACTIVE':
-            raise Exception("Batch Job Definition '{}' is not in 'ACTIVE' status".format(job_definition['jobDefinitionArn']))
+            raise Exception(
+                "Batch Job Definition '{}' is not in 'ACTIVE' status".format(job_definition['jobDefinitionArn']))
 
     # Check that all the Job Queues exist
     # TODO pagination if over 100 resources
@@ -259,12 +313,14 @@ def get_json_path(source, path):
 
 def parse_arn(arn: str) -> Arn:
     """
-    Parse an ARN into its constituent components.  Based on schema at 
+    Parse an ARN into its constituent components.  Based on schema at
     http://docs.aws.amazon.com/general/latest/gr/aws-arns-and-namespaces.html
     :param arn: string
     :return: dict
     """
-    match = re.match('^arn:aws:(?P<service>[\w\-]+):(?P<region>[a-zA-Z]+-[a-zA-Z]+-\d+|):(?P<account>\d*):(?P<resourcetype>.+?)(?:[:\/](?P<resource>.*))?$', arn)
+    match = re.match(
+        '^arn:aws:(?P<service>[\w\-]+):(?P<region>[a-zA-Z]+-[a-zA-Z]+-\d+|):(?P<account>\d*):(?P<resourcetype>.+?)(?:[:\/](?P<resource>.*))?$',
+        arn)
     if not match:
         logger.warning("Failed to parse '{}' as an ARN".format(arn))
         return None
