@@ -11,49 +11,12 @@ Parameters:
         Type: "String"
         Description: "The name of the Project"
 
-    DynamodbTableName:
+    S3Bucket:
         Type: "String"
-        Default: "aws-sfn-batch"
-        Description: "The name of the DynamoDb table"
-    DynamodbReadCapacity:
-        Type: "String"
-        Default: "1"
-        Description: "The read capacity of the DynamoDb table"
-    DynamodbWriteCapacity:
-        Type: "String"
-        Default: "1"
-        Description: "The read capacity of the DynamoDb table"
+        Description: "The name of the S3 bucket where Lambda functions are stored"
 
-Metadata:
-    "AWS::CloudFormation::Interface":
-        ParameterGroups:
-          - Label: { default: "DynamoDb" }
-            Parameters:
-              - "DynamodbTableName"
-              - "DynamodbReadCapacity"
-              - "DynamodbWriteCapacity"
-
-        ParameterLabels:
-            DynamodbTableName: { default: "Table Name" }
-            DynamodbReadCapacity: { default: "Read Capacity" }
-            DynamodbWriteCapacity: { default: "Write Capacity" }
 
 Resources:
-
-    ##########################################################################################################
-    ## S3
-    ##########################################################################################################
-
-    S3Bucket:
-        Type: "AWS::S3::Bucket"
-        Properties:
-            BucketName: { "Fn::Sub": "biometrix-${Project}-aws-sfn-batch" }
-            Tags:
-              - { Key: "Management", Value: "managed" }
-              - { Key: "Project", Value: { Ref: "Project" } }
-              - { Key: "Environment", Value: "infra" }
-        # Don't delete this if we accidentally delete the stack (which would fail anyway unless the bucket is empty)
-        DeletionPolicy : "Retain"
 
     ##########################################################################################################
     ##  IAM
@@ -90,7 +53,7 @@ Resources:
                           - "batch:SubmitJob"
                         Effect: "Allow"
                         Resource: "*"
-            RoleName: { "Fn::Sub": "${Project}-sfn-batch" }
+            RoleName: { "Fn::Sub": "${Project}-sfn-batch-${AWS::Region}" }
 
     ##########################################################################################################
     ##  LAMBDA
@@ -107,18 +70,6 @@ Resources:
             Timeout: "300"
             Role: { "Fn::GetAtt" : [ "LambdaExecutionRole", "Arn" ] }
             FunctionName: { "Fn::Sub": "${Project}-sfn-batch-schedule" }
-
-    LambdaScheduleSingle:
-        Type: "AWS::Lambda::Function"
-        Properties:
-            Code:
-                S3Bucket: { Ref: "S3Bucket" }
-                S3Key: "lambdas/sfn_batch.zip"
-            Handler: "sfn_batch.handler_schedule_single"
-            Runtime: "python3.6"
-            Timeout: "300"
-            Role: { "Fn::GetAtt" : [ "LambdaExecutionRole", "Arn" ] }
-            FunctionName: { "Fn::Sub": "${Project}-sfn-batch-schedule-single" }
 
     LambdaRespond:
         Type: "AWS::Lambda::Function"
@@ -139,12 +90,6 @@ Outputs:
         Value: { "Fn::GetAtt": [ "LambdaSchedule", "Arn" ] }
         Export:
             Name: "SfnBatchLambdaSchedule"
-
-    LambdaScheduleSingle:
-        Description: "ARN of schedule_single lambda"
-        Value: { "Fn::GetAtt": [ "LambdaScheduleSingle", "Arn" ] }
-        Export:
-            Name: "SfnBatchLambdaScheduleSingle"
 
     LambdaRespond:
         Description: "ARN of respond lambda"
