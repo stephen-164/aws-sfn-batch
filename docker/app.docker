@@ -1,0 +1,13 @@
+FROM frolvlad/alpine-python3
+
+# Set up users and directories
+USER root
+WORKDIR /opt/biometrix/sfn_batch
+
+RUN pip3 install \
+    boto3
+
+# Copy application code
+COPY ./app .
+
+CMD ["/opt/biometrix/sfn_batch/sfn_batch.py"]

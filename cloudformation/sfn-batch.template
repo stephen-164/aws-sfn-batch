@@ -29,7 +29,7 @@ Resources:
                 Version: "2012-10-17"
                 Statement:
                   - Effect: "Allow"
-                    Principal: { Service: [ "lambda.amazonaws.com" ] }
+                    Principal: { Service: [ "lambda.amazonaws.com", "ecs-tasks.amazonaws.com" ] }
                     Action: "sts:AssumeRole"
             Policies:
               - PolicyName: "logs"
@@ -71,17 +71,14 @@ Resources:
             Role: { "Fn::GetAtt" : [ "LambdaExecutionRole", "Arn" ] }
             FunctionName: { "Fn::Sub": "${Project}-sfn-batch-schedule" }
 
-    LambdaRespond:
-        Type: "AWS::Lambda::Function"
+    ##########################################################################################################
+    ## ECR
+    ##########################################################################################################
+
+    EcrRepository:
+        Type: "AWS::ECR::Repository"
         Properties:
-            Code:
-                S3Bucket: { Ref: "S3Bucket" }
-                S3Key: "lambdas/sfn_batch.zip"
-            Handler: "sfn_batch.handler_respond"
-            Runtime: "python3.6"
-            Timeout: "30"
-            Role: { "Fn::GetAtt" : [ "LambdaExecutionRole", "Arn" ] }
-            FunctionName: { "Fn::Sub": "${Project}-sfn-batch-respond" }
+            RepositoryName: { "Fn::Sub": "sfn_batch" }
 
 Outputs:
 
@@ -90,9 +87,3 @@ Outputs:
         Value: { "Fn::GetAtt": [ "LambdaSchedule", "Arn" ] }
         Export:
             Name: "SfnBatchLambdaSchedule"
-
-    LambdaRespond:
-        Description: "ARN of respond lambda"
-        Value: { "Fn::GetAtt": [ "LambdaRespond", "Arn" ] }
-        Export:
-            Name: "SfnBatchLambdaRespond"
