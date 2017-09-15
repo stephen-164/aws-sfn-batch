@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from hashlib import md5
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -18,6 +19,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 sfn_client = boto3.client('stepfunctions')
+sqs_client = boto3.client('sqs')
 batch_client = boto3.client('batch')
 
 Arn = namedtuple('Arn', ['partition', 'service', 'region', 'account', 'resourcetype', 'resource'])
@@ -25,7 +27,7 @@ BatchJob = namedtuple('BatchJob', ['id', 'name'])
 BatchRecord = namedtuple('BatchRecord', ['execution_id', 'batch_job', 'task_token', 'status'])
 
 
-def runner(activity_arn, worker_name):
+def sfn_runner(activity_arn, sqs_arn, worker_name):
     """
     An eternal loop for polling for SFN activities and scheduling the corresponding batch jobs
     """
@@ -45,13 +47,53 @@ def runner(activity_arn, worker_name):
                 logger.info('No task waiting')
                 continue
 
+            if 'LinearityGroup' in task_event:
+                deduplication_id = str(uuid.uuid4())
+                # Need to push this through an SQS queue to enforce one-at-a-time processing to avoid race conditions
+                sqs_client.send_message(
+                    QueueUrl=sqs_arn,
+                    MessageBody=json.dumps({'TaskToken': task_token, 'TaskEvent': task_event}),
+                    MessageDeduplicationId=deduplication_id,
+                    MessageGroupId=task_event['LinearityGroup']
+                )
+            else:
+                scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
+                logger.info('Scheduled batch jobs, scheduled_execution_id={}'.format(scheduled_execution_id))
+
+        except BaseException as e:
+            # On any error, print and continue
+            logger.error("An error occurred:")
+            logger.error(repr(e))
+            time.sleep(10)
+
+
+def sqs_runner(sqs_arn):
+    """
+    An eternal loop for polling an SQS queue and scheduling the corresponding batch jobs
+    """
+    while True:
+        try:
+            rraid = str(uuid.uuid4())
+            logger.info('Polling for task_token with ReceiveRequestAttemptId={}'.format(rraid))
+            response = sqs_client.receive_message(
+                QueueUrl=sqs_arn,
+                AttributeNames=['MessageGroupId'],
+                WaitTimeSeconds=20,
+                MaxNumberOfMessages=1,
+                ReceiveRequestAttemptId=rraid
+            )
+            if len(response.get('Messages', [])) == 0:
+                continue
+
+            task_body = json.loads(response['Messages'][0]['Body'])
+            (task_token, task_event) = (task_body['TaskToken'], task_body['TaskEvent'])
+
+            logger.debug(response)
+            logger.info('task_token={}, task_event={}'.format(task_token, json.dumps(task_event)))
+
             # Otherwise we have scheduling work to do
             scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
-            logger.info('Scheduled batch jobs, scheduled_execution_id={}'.format(scheduled_execution_id))
-
-            # Otherwise we go round again
-            logger.info('Going round for another pass')
-            continue
+            logger.info('Scheduled batch jobs from SQS, scheduled_execution_id={}'.format(scheduled_execution_id))
 
         except BaseException as e:
             # On any error, print and continue
@@ -267,10 +309,22 @@ def json_serial(obj):
 
 
 if __name__ == '__main__':
-    arg_activity_arn = os.environ.get('ACTIVITY_ARN', None)
-    if not arg_activity_arn:
-        raise Exception("No activity ARN given")
+    arg_sqs_arn = os.environ.get('SQS_QUEUE_NAME', None)
+    if not arg_sqs_arn:
+        raise Exception("No SQS ARN given")
 
     arg_worker_name = os.environ.get('WORKER_NAME', None)
 
-    runner(arg_activity_arn, arg_worker_name)
+    source = os.environ.get('SOURCE', 'SFN')
+
+    if source == 'SFN':
+        arg_activity_arn = os.environ.get('ACTIVITY_ARN', None)
+        if not arg_activity_arn:
+            raise Exception("No activity ARN given")
+        sfn_runner(arg_activity_arn, arg_sqs_arn, arg_worker_name)
+
+    elif source == 'SQS':
+        sqs_runner(arg_sqs_arn)
+
+    else:
+        raise Exception("Unknown source {}".format(source))

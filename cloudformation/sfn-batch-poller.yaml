@@ -24,6 +24,10 @@ Parameters:
     ActivityArn:
         Description: "The ARN of the Activity to listen for"
         Type: "String"
+    SqsQueueName:
+        Description: "The ARN of the FIFO SQS Queue to use for linearity enforcement"
+        Type: "String"
+        Default: ""
 
     InstanceSize:
         AllowedValues: [ "t2.micro" ]
@@ -111,6 +115,41 @@ Resources:
               - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
             RoleName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller-ecs-${AWS::Region}" }
 
+    EcsContainerRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  - Effect: "Allow"
+                    Principal: { Service: [ "ecs-tasks.amazonaws.com" ] }
+                    Action: "sts:AssumeRole"
+            Policies:
+              - PolicyName: "logs"
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                      - Action:
+                          - "logs:CreateLogGroup"
+                          - "logs:CreateLogStream"
+                          - "logs:PutLogEvents"
+                        Effect: "Allow"
+                        Resource: "*"
+              - PolicyName: "execution"
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                      - Action:
+                          - "states:GetActivityTask"
+                          - "batch:DescribeJobDefinitions"
+                          - "batch:DescribeJobQueues"
+                          - "batch:SubmitJob"
+                          - "sqs:ReceiveMessage"
+                          - "sqs:SendMessage"
+                        Effect: "Allow"
+                        Resource: "*"
+            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-ecscontainer-${AWS::Region}" }
+
     ##########################################################################################################
     ##  CLUSTER
     ##########################################################################################################
@@ -169,6 +208,8 @@ Resources:
                 Environment:
                   - { Name: "AWS_DEFAULT_REGION", Value: { Ref: "AWS::Region" } }
                   - { Name: "ACTIVITY_ARN", Value: { Ref: "ActivityArn" } }
+                  - { Name: "SQS_QUEUE_NAME", Value: { Ref: "SqsQueueName" } }
+                  - { Name: "SOURCE", Value: "SFN" }
                   - { Name: "WORKER_NAME", Value: "sfn-poller" }
                 Image: { "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sfn_batch:latest" }
                 LogConfiguration:
@@ -179,7 +220,7 @@ Resources:
                 Memory: 128
                 Name: "sfn-batch-poller"
             Family: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller" }
-            TaskRoleArn: { "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/${Project}-sfn-batch-${AWS::Region}" }
+            TaskRoleArn: { Ref: "EcsContainerRole" }
 
     EcsService:
         Type: "AWS::ECS::Service"
@@ -187,3 +228,38 @@ Resources:
             TaskDefinition: { Ref: "TaskDefinition" }
             DesiredCount: 2
             Cluster: { Ref: "EcsCluster" }
+            PlacementStrategies:
+              - Field: "host"
+                Type: "spread"
+
+    TaskDefinitionSqs:
+        Type: "AWS::ECS::TaskDefinition"
+        Properties:
+            ContainerDefinitions:
+              - Cpu: "10"
+                Environment:
+                  - { Name: "AWS_DEFAULT_REGION", Value: { Ref: "AWS::Region" } }
+                  - { Name: "ACTIVITY_ARN", Value: { Ref: "ActivityArn" } }
+                  - { Name: "SQS_QUEUE_NAME", Value: { Ref: "SqsQueueName" } }
+                  - { Name: "SOURCE", Value: "SQS" }
+                  - { Name: "WORKER_NAME", Value: "sfn-poller" }
+                Image: { "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sfn_batch:latest" }
+                LogConfiguration:
+                    LogDriver: "awslogs"
+                    Options:
+                        awslogs-group: { Ref: "CloudwatchLogsGroup" }
+                        awslogs-region: { Ref: "AWS::Region" }
+                Memory: 128
+                Name: "sfn-batch-poller-sqs"
+            Family: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller-sqs" }
+            TaskRoleArn: { Ref: "EcsContainerRole" }
+
+    EcsServiceSqs:
+        Type: "AWS::ECS::Service"
+        Properties:
+            TaskDefinition: { Ref: "TaskDefinitionSqs" }
+            DesiredCount: 2
+            Cluster: { Ref: "EcsCluster" }
+            PlacementStrategies:
+              - Field: "host"
+                Type: "spread"
