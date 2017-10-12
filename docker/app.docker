@@ -9,5 +9,6 @@ RUN pip3 install \
 
 # Copy application code
 COPY ./app .
+RUN ["chmod", "+x", "/opt/biometrix/sfn_batch/sfn_batch.py"]
 
 CMD ["/opt/biometrix/sfn_batch/sfn_batch.py"]
