@@ -47,7 +47,7 @@ def sfn_runner(activity_arn, sqs_arn, worker_name):
                 logger.info('No task waiting')
                 continue
 
-            if 'LinearityGroup' in task_event:
+            if 'LinearityGroup' in task_event and task_event['LinearityGroup']:
                 deduplication_id = str(uuid.uuid4())
                 # Need to push this through an SQS queue to enforce one-at-a-time processing to avoid race conditions
                 sqs_client.send_message(
