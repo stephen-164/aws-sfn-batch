@@ -1,9 +1,9 @@
-# A template that creates an ECS cluster serving the sfn-batch poller
+# A template that creates an ECS cluster serving the sfnbatch poller
 #
 # Copyright 2017 Melon Software Ltd (UK), all rights reserved
 #
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Creates an ECS cluster running the sfn-batch poller"
+Description: "Creates an ECS cluster running the sfnbatch poller"
 
 Parameters:
 
@@ -33,6 +33,11 @@ Parameters:
         AllowedValues: [ "t2.micro" ]
         Default: "t2.micro"
         Description: "The desired EC2 instance size"
+        Type: "String"
+
+    PollerVersion:
+        Default: "latest"
+        Description: "Docker tag of version to deploy"
         Type: "String"
         
 Mappings:
@@ -74,7 +79,7 @@ Resources:
                     Action: "sts:AssumeRole"
             ManagedPolicyArns:
               - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
-            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller-ec2-${AWS::Region}" }
+            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller-ec2-${AWS::Region}" }
 
     Ec2InstanceStartupProfile:
         Type: "AWS::IAM::InstanceProfile"
@@ -95,7 +100,7 @@ Resources:
                 CidrIp: { "Fn::Sub": "10.0.0.0/16" }
 
             Tags:
-              - { Key: "Name", Value: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller-ec2" } }
+              - { Key: "Name", Value: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller-ec2" } }
               - { Key: "Management", Value: "managed" }
               - { Key: "Project", Value: { Ref: "Project" } }
               - { Key: "Environment", Value: { Ref: "Environment" } }
@@ -113,7 +118,7 @@ Resources:
             Path: "/"
             ManagedPolicyArns:
               - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
-            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller-ecs-${AWS::Region}" }
+            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller-ecs-${AWS::Region}" }
 
     EcsContainerRole:
         Type: "AWS::IAM::Role"
@@ -148,7 +153,7 @@ Resources:
                           - "sqs:SendMessage"
                         Effect: "Allow"
                         Resource: "*"
-            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-ecscontainer-${AWS::Region}" }
+            RoleName: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-ecscontainer-${AWS::Region}" }
 
     ##########################################################################################################
     ##  CLUSTER
@@ -180,7 +185,7 @@ Resources:
             DesiredCapacity: 2
             TerminationPolicies: [ "OldestLaunchConfiguration", "OldestInstance", "Default" ]
             Tags:
-              - { Key: "Name", Value: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller" }, PropagateAtLaunch: true }
+              - { Key: "Name", Value: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller" }, PropagateAtLaunch: true }
               - { Key: "Management", Value: "managed", PropagateAtLaunch: true }
               - { Key: "Project", Value: { Ref: "Project" }, PropagateAtLaunch: true }
               - { Key: "Environment", Value: { Ref: "Environment" }, PropagateAtLaunch: true }
@@ -188,7 +193,7 @@ Resources:
     EcsCluster:
         Type: "AWS::ECS::Cluster"
         Properties:
-            ClusterName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller" }
+            ClusterName: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller" }
 
     ##########################################################################################################
     ##  POLLER SERVICE
@@ -197,7 +202,7 @@ Resources:
     CloudwatchLogsGroup:
         Type: "AWS::Logs::LogGroup"
         Properties:
-            LogGroupName: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller" }
+            LogGroupName: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller" }
             RetentionInDays: 14
 
     TaskDefinition:
@@ -211,15 +216,15 @@ Resources:
                   - { Name: "SQS_QUEUE_NAME", Value: { Ref: "SqsQueueName" } }
                   - { Name: "SOURCE", Value: "SFN" }
                   - { Name: "WORKER_NAME", Value: "sfn-poller" }
-                Image: { "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sfn_batch:latest" }
+                Image: { "Fn::Join": [ ":", [ { "Fn::ImportValue": "EcrRepositorySfnbatch" }, { Ref: "PollerVersion" } ] ] }
                 LogConfiguration:
                     LogDriver: "awslogs"
                     Options:
                         awslogs-group: { Ref: "CloudwatchLogsGroup" }
                         awslogs-region: { Ref: "AWS::Region" }
                 Memory: 128
-                Name: "sfn-batch-poller"
-            Family: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller" }
+                Name: "sfnbatch-poller"
+            Family: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller" }
             TaskRoleArn: { Ref: "EcsContainerRole" }
 
     EcsService:
@@ -243,15 +248,15 @@ Resources:
                   - { Name: "SQS_QUEUE_NAME", Value: { Ref: "SqsQueueName" } }
                   - { Name: "SOURCE", Value: "SQS" }
                   - { Name: "WORKER_NAME", Value: "sfn-poller" }
-                Image: { "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sfn_batch:latest" }
+                Image: { "Fn::Join": [ ":", [ { "Fn::ImportValue": "EcrRepositorySfnbatch" }, { Ref: "PollerVersion" } ] ] }
                 LogConfiguration:
                     LogDriver: "awslogs"
                     Options:
                         awslogs-group: { Ref: "CloudwatchLogsGroup" }
                         awslogs-region: { Ref: "AWS::Region" }
                 Memory: 128
-                Name: "sfn-batch-poller-sqs"
-            Family: { "Fn::Sub": "${Project}-${Environment}-sfn-batch-poller-sqs" }
+                Name: "sfnbatch-poller-sqs"
+            Family: { "Fn::Sub": "${Project}-${Environment}-sfnbatch-poller-sqs" }
             TaskRoleArn: { Ref: "EcsContainerRole" }
 
     EcsServiceSqs:

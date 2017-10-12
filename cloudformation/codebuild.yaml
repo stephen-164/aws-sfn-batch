@@ -1,0 +1,94 @@
+# A template that creates a code pipeline to create a new Docker image and register it to ECR
+#
+# Copyright 2016 Melon Software Ltd (UK), all rights reserved
+#
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Creates a Code Pipeline to create a Job Definition with a new Docker image registered in ECR"
+
+Mappings:
+    ServiceConfiguration:
+        sessionprocess2:
+            Cpu: 128
+            Memory: 128
+            Port: 80
+            BuildSize: "BUILD_GENERAL1_SMALL"
+
+Resources:
+
+    ##########################################################################################################
+    ## ECR
+    ##########################################################################################################
+
+    EcrRepository:
+        Type: "AWS::ECR::Repository"
+        Properties:
+            RepositoryName: { "Fn::Sub": "preprocessing/sfnbatch" }
+
+    ##########################################################################################################
+    ##  CODEBUILD
+    ##########################################################################################################
+
+    CodeBuildProject:
+        Type: "AWS::CodeBuild::Project"
+        Properties:
+            Name: { "Fn::Sub": 'preprocessing-sfnbatch' }
+            Description: { "Fn::Sub": 'Builds a new Docker image for the sfn-batch poller service and registers it to ECR' }
+            ServiceRole: { "Fn::ImportValue": "CodeBuildServiceRole" }
+            Artifacts:
+                Type: "no_artifacts"
+            Environment:
+                Type: "linuxContainer"
+                ComputeType: "BUILD_GENERAL1_SMALL"
+                Image: "aws/codebuild/docker:1.12.1"
+                EnvironmentVariables:
+                  - { Name: "AWS_DEFAULT_REGION", Value: { Ref: "AWS::Region" } }
+                  - { Name: "ECR_REGISTRY", Value: { "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com" } }
+                  - { Name: "ECR_REPOSITORY", Value: { Ref: "EcrRepository" } }
+            TimeoutInMinutes: 30
+            Tags:
+              - { Key: "Name", Value: { "Fn::Sub": "preprocessing-sfnbatch" } }
+              - { Key: "Management", Value: "managed" }
+              - { Key: "Project", Value: "preprocessing" }
+              - { Key: "Environment", Value: "infra" }
+            Source:
+                Location: { "Fn::Sub": 'https://github.com/stephen-164/aws-sfn-batch.git' }
+                Type: "GITHUB"
+                BuildSpec: |
+                    version: 0.2
+                    phases:
+                        install:
+                            commands:
+                                # Upgrade AWS CLI
+                              - pip install --upgrade --user awscli
+                              - aws --version
+
+                        pre_build:
+                            commands:
+                              - GIT_COMMIT=$(git rev-parse --short HEAD)
+                              - IMAGE_NAME=$ECR_REGISTRY/$ECR_REPOSITORY
+
+                                # Log in to the registry
+                              - $(aws ecr get-login --region $AWS_DEFAULT_REGION)
+
+                        build:
+                            commands:
+                                # Build the docker image
+                              - docker build -f docker/app.docker -t $IMAGE_NAME:$GIT_COMMIT -t $IMAGE_NAME:latest .
+
+                        post_build:
+                            commands:
+
+                                # Push the image to the docker registry
+                              - docker push $IMAGE_NAME:$GIT_COMMIT
+                              - docker push $IMAGE_NAME:latest
+
+    ##########################################################################################################
+    ## OUTPUTS
+    ##########################################################################################################
+
+Outputs:
+    EcrRepositorySfnbatch:
+        Description: "The reference to the ECR Repository for the sfnbatch image"
+        Value: { "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}" }
+        Export:
+            Name: "EcrRepositorySfnbatch"
