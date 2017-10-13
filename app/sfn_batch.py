@@ -40,12 +40,16 @@ def sfn_runner(activity_arn, sqs_arn, worker_name):
             )
             (task_token, task_event) = (response.get('taskToken', ''), json.loads(response.get('input', '""')))
             logger.debug(response)
-            logger.info('task_token={}, task_event={}'.format(task_token, json.dumps(task_event)))
+            logger.info('task_token={}'.format(task_token))
+            logger.info(json.dumps(task_event))
 
             if task_token == '':
                 # There are no tasks waiting to be scheduled.
                 logger.info('No task waiting')
                 continue
+
+            # Sending a heartbeat also confirms that it hasn't already timed out
+            send_sfn_heartbeat(task_token)
 
             if 'LinearityGroup' in task_event and task_event['LinearityGroup']:
                 deduplication_id = str(uuid.uuid4())
@@ -56,6 +60,7 @@ def sfn_runner(activity_arn, sqs_arn, worker_name):
                     MessageDeduplicationId=deduplication_id,
                     MessageGroupId=task_event['LinearityGroup']
                 )
+                logger.info('Sent batch job to SQS for linearity enforcement, with deduplication_id={}'.format(deduplication_id))
             else:
                 scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
                 logger.info('Scheduled batch jobs, scheduled_execution_id={}'.format(scheduled_execution_id))
@@ -89,9 +94,12 @@ def sqs_runner(sqs_arn):
             (task_token, task_event) = (task_body['TaskToken'], task_body['TaskEvent'])
 
             logger.debug(response)
-            logger.info('task_token={}, task_event={}'.format(task_token, json.dumps(task_event)))
+            logger.info('task_token={}'.format(task_token))
+            logger.info(json.dumps(task_event))
 
-            # Otherwise we have scheduling work to do
+            # Sending a heartbeat also confirms that it hasn't already timed out
+            send_sfn_heartbeat(task_token)
+
             scheduled_execution_id = schedule_batch_jobs(task_event, task_token)
             logger.info('Scheduled batch jobs from SQS, scheduled_execution_id={}'.format(scheduled_execution_id))
 
@@ -197,6 +205,13 @@ def schedule_batch_jobs(event, task_token):
     return meta['ExecutionArn']
 
 
+def send_sfn_heartbeat(task_token):
+    if task_token is not None:
+        sfn_client.send_task_heartbeat(
+            taskToken=task_token,
+        )
+
+
 def validate_schedule_input(input_data, branches):
     """
     Validate input
@@ -293,7 +308,6 @@ def parse_arn(arn: str) -> Arn:
         logger.warning("Failed to parse '{}' as an ARN".format(arn))
         return None
     else:
-        logger.info(match.groupdict())
         return Arn(**{**match.groupdict(), **{'partition': 'aws'}})
 
 

@@ -146,6 +146,7 @@ Resources:
                     Statement:
                       - Action:
                           - "states:GetActivityTask"
+                          - "states:SendTaskHeartbeat"
                           - "batch:DescribeJobDefinitions"
                           - "batch:DescribeJobQueues"
                           - "batch:SubmitJob"
