@@ -97,6 +97,14 @@ def sqs_runner(sqs_arn):
             logger.info('task_token={}'.format(task_token))
             logger.info(json.dumps(task_event))
 
+            # We need to capture the receipt handle so that we can remove the job from the SQS queue
+            receipt_handle = response['Messages'][0]['ReceiptHandle']
+            logger.debug(receipt_handle)
+            task_event['Meta']['LinearityGroup'] = {
+                'QueueUrl': sqs_arn,
+                'ReceiptHandle': receipt_handle
+            }
+
             # Sending a heartbeat also confirms that it hasn't already timed out
             send_sfn_heartbeat(task_token)
 
